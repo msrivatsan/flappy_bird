@@ -54,6 +54,21 @@
         #muteButton:active {
             transform: scale(0.95);
         }
+
+        #jumpscare {
+            position: fixed;
+            inset: 0;
+            width: 100vw;
+            height: 100vh;
+            z-index: 1000;
+            display: none;
+            pointer-events: none;
+            background: #000;
+        }
+
+        #jumpscare.active {
+            display: block;
+        }
     </style>
 </head>
 <body>
@@ -61,6 +76,7 @@
         <canvas id="gameCanvas" width="360" height="540"></canvas>
         <button id="muteButton">🔊</button>
     </div>
+    <canvas id="jumpscare"></canvas>
 
     <script>
         // ========================================
@@ -161,6 +177,130 @@
                     oscillator.stop(this.context.currentTime + duration);
                 } catch (e) {
                     console.warn('Error playing sound:', e);
+                }
+            }
+
+            // Loud, distorted procedural scream for the death jumpscare
+            playScream() {
+                if (this.muted || !this.context) return;
+                const ctx = this.context;
+                const now = ctx.currentTime;
+                const dur = 1.8;
+
+                try {
+                    // Master chain: gain -> limiter so it is LOUD but doesn't clip into garbage
+                    const master = ctx.createGain();
+                    master.gain.setValueAtTime(0.0001, now);
+                    master.gain.exponentialRampToValueAtTime(1.0, now + 0.02);
+                    master.gain.setValueAtTime(1.0, now + dur - 0.4);
+                    master.gain.exponentialRampToValueAtTime(0.0001, now + dur);
+
+                    const limiter = ctx.createDynamicsCompressor();
+                    limiter.threshold.value = -6;
+                    limiter.knee.value = 0;
+                    limiter.ratio.value = 20;
+                    limiter.attack.value = 0.001;
+                    limiter.release.value = 0.1;
+                    master.connect(limiter);
+                    limiter.connect(ctx.destination);
+
+                    // Distortion curve
+                    const shaper = ctx.createWaveShaper();
+                    const n = 2048, k = 400;
+                    const curve = new Float32Array(n);
+                    for (let i = 0; i < n; i++) {
+                        const x = (i * 2) / n - 1;
+                        curve[i] = ((3 + k) * x * 20 * Math.PI / 180) / (Math.PI + k * Math.abs(x));
+                    }
+                    shaper.curve = curve;
+                    shaper.oversample = '4x';
+                    shaper.connect(master);
+
+                    // Shrieking voice: detuned sawtooths with wild vibrato
+                    const voiceBus = ctx.createGain();
+                    voiceBus.gain.value = 0.5;
+                    const bp = ctx.createBiquadFilter();
+                    bp.type = 'bandpass';
+                    bp.frequency.setValueAtTime(1800, now);
+                    bp.Q.value = 1.2;
+                    voiceBus.connect(bp);
+                    bp.connect(shaper);
+
+                    const lfo = ctx.createOscillator();
+                    lfo.frequency.setValueAtTime(18, now);
+                    lfo.frequency.linearRampToValueAtTime(35, now + dur);
+                    const lfoGain = ctx.createGain();
+                    lfoGain.gain.value = 120;
+                    lfo.connect(lfoGain);
+
+                    [0.97, 1.0, 1.03, 1.51, 2.02].forEach(mult => {
+                        const o = ctx.createOscillator();
+                        o.type = 'sawtooth';
+                        o.frequency.setValueAtTime(500 * mult, now);
+                        o.frequency.exponentialRampToValueAtTime(1400 * mult, now + 0.15);
+                        o.frequency.exponentialRampToValueAtTime(1100 * mult, now + 0.9);
+                        o.frequency.exponentialRampToValueAtTime(300 * mult, now + dur);
+                        lfoGain.connect(o.frequency);
+                        o.connect(voiceBus);
+                        o.start(now);
+                        o.stop(now + dur);
+                    });
+                    lfo.start(now);
+                    lfo.stop(now + dur);
+
+                    // Harsh noise burst
+                    const noiseLen = Math.floor(ctx.sampleRate * dur);
+                    const buf = ctx.createBuffer(1, noiseLen, ctx.sampleRate);
+                    const data = buf.getChannelData(0);
+                    for (let i = 0; i < noiseLen; i++) data[i] = Math.random() * 2 - 1;
+                    const noise = ctx.createBufferSource();
+                    noise.buffer = buf;
+                    const noiseGain = ctx.createGain();
+                    noiseGain.gain.setValueAtTime(0.9, now);
+                    noiseGain.gain.exponentialRampToValueAtTime(0.25, now + 0.4);
+                    noiseGain.gain.exponentialRampToValueAtTime(0.0001, now + dur);
+                    const hp = ctx.createBiquadFilter();
+                    hp.type = 'highpass';
+                    hp.frequency.value = 900;
+                    noise.connect(hp);
+                    hp.connect(noiseGain);
+                    noiseGain.connect(shaper);
+                    noise.start(now);
+
+                    // Metallic screech on top
+                    const screech = ctx.createOscillator();
+                    screech.type = 'square';
+                    screech.frequency.setValueAtTime(3200, now);
+                    screech.frequency.linearRampToValueAtTime(2400, now + dur);
+                    const screechMod = ctx.createOscillator();
+                    screechMod.frequency.value = 73;
+                    const screechModGain = ctx.createGain();
+                    screechModGain.gain.value = 900;
+                    screechMod.connect(screechModGain);
+                    screechModGain.connect(screech.frequency);
+                    const screechGain = ctx.createGain();
+                    screechGain.gain.value = 0.12;
+                    screech.connect(screechGain);
+                    screechGain.connect(shaper);
+                    screech.start(now);
+                    screechMod.start(now);
+                    screech.stop(now + dur);
+                    screechMod.stop(now + dur);
+
+                    // Gut-punch sub boom (bypasses distortion)
+                    const boom = ctx.createOscillator();
+                    boom.type = 'sine';
+                    boom.frequency.setValueAtTime(120, now);
+                    boom.frequency.exponentialRampToValueAtTime(30, now + 0.6);
+                    const boomGain = ctx.createGain();
+                    boomGain.gain.setValueAtTime(1.0, now);
+                    boomGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.8);
+                    boom.connect(boomGain);
+                    boomGain.connect(master);
+                    boom.start(now);
+                    boom.stop(now + 0.8);
+                } catch (e) {
+                    console.warn('Error playing scream:', e);
                 }
             }
 
@@ -359,6 +499,231 @@
         }
 
         // ========================================
+        // JUMPSCARE
+        // ========================================
+
+        class Jumpscare {
+            constructor(canvas) {
+                this.canvas = canvas;
+                this.ctx = canvas.getContext('2d');
+                this.active = false;
+                this.start = 0;
+                this.duration = 1700; // ms
+                this.onDone = null;
+
+                // Low-res buffer for TV static
+                this.noise = document.createElement('canvas');
+                this.noise.width = 160;
+                this.noise.height = 120;
+                this.noiseCtx = this.noise.getContext('2d');
+                this.noiseImg = this.noiseCtx.createImageData(160, 120);
+            }
+
+            trigger(onDone) {
+                this.canvas.width = window.innerWidth;
+                this.canvas.height = window.innerHeight;
+                this.canvas.classList.add('active');
+                this.active = true;
+                this.start = performance.now();
+                this.onDone = onDone;
+                if (navigator.vibrate) navigator.vibrate([300, 50, 400]);
+                requestAnimationFrame(() => this.frame());
+            }
+
+            frame() {
+                if (!this.active) return;
+                const t = performance.now() - this.start;
+                if (t >= this.duration) {
+                    this.active = false;
+                    this.canvas.classList.remove('active');
+                    if (this.onDone) this.onDone();
+                    return;
+                }
+                this.draw(t);
+                requestAnimationFrame(() => this.frame());
+            }
+
+            drawStatic(alpha) {
+                const d = this.noiseImg.data;
+                for (let i = 0; i < d.length; i += 4) {
+                    const v = Math.random() * 255;
+                    d[i] = v; d[i + 1] = v * 0.6; d[i + 2] = v * 0.6; d[i + 3] = 255;
+                }
+                this.noiseCtx.putImageData(this.noiseImg, 0, 0);
+                const ctx = this.ctx;
+                ctx.save();
+                ctx.globalAlpha = alpha;
+                ctx.imageSmoothingEnabled = false;
+                ctx.drawImage(this.noise, 0, 0, this.canvas.width, this.canvas.height);
+                ctx.restore();
+            }
+
+            draw(t) {
+                const ctx = this.ctx;
+                const W = this.canvas.width, H = this.canvas.height;
+                const p = t / this.duration;
+
+                // Strobing background: black / blood red / white flash
+                const strobe = Math.floor(t / 45) % 7;
+                ctx.fillStyle = t < 60 ? '#fff' : strobe === 0 ? '#600' : strobe === 3 ? '#fff' : '#000';
+                ctx.fillRect(0, 0, W, H);
+
+                // Face lunges at the camera then keeps creeping closer
+                const lunge = t < 140 ? 0.2 + (t / 140) * 1.0 : 1.2 + p * 0.35;
+                const size = Math.min(W, H) * 0.55 * lunge;
+                const shake = 30 * (1 - p * 0.5);
+                const cx = W / 2 + (Math.random() - 0.5) * shake;
+                const cy = H / 2 + (Math.random() - 0.5) * shake;
+
+                ctx.save();
+                ctx.translate(cx, cy);
+                ctx.rotate((Math.random() - 0.5) * 0.12);
+                ctx.scale(1 + (Math.random() - 0.5) * 0.08, 1 + (Math.random() - 0.5) * 0.08);
+
+                // Red glow behind head
+                const glow = ctx.createRadialGradient(0, 0, size * 0.3, 0, 0, size * 1.6);
+                glow.addColorStop(0, 'rgba(180,0,0,0.9)');
+                glow.addColorStop(1, 'rgba(0,0,0,0)');
+                ctx.fillStyle = glow;
+                ctx.fillRect(-size * 2, -size * 2, size * 4, size * 4);
+
+                // Gaunt, pale skull-face
+                const skin = ctx.createRadialGradient(0, -size * 0.2, size * 0.1, 0, 0, size);
+                skin.addColorStop(0, '#d8d2c0');
+                skin.addColorStop(0.6, '#8a8270');
+                skin.addColorStop(1, '#2a2418');
+                ctx.fillStyle = skin;
+                ctx.beginPath();
+                ctx.moveTo(0, -size);
+                ctx.bezierCurveTo(size * 0.85, -size, size * 0.8, -size * 0.1, size * 0.55, size * 0.5);
+                ctx.bezierCurveTo(size * 0.4, size * 0.95, size * 0.15, size * 1.1, 0, size * 1.1);
+                ctx.bezierCurveTo(-size * 0.15, size * 1.1, -size * 0.4, size * 0.95, -size * 0.55, size * 0.5);
+                ctx.bezierCurveTo(-size * 0.8, -size * 0.1, -size * 0.85, -size, 0, -size);
+                ctx.fill();
+
+                // Sunken eye sockets
+                [-1, 1].forEach(side => {
+                    const ex = side * size * 0.27, ey = -size * 0.22;
+                    const sock = ctx.createRadialGradient(ex, ey, 0, ex, ey, size * 0.26);
+                    sock.addColorStop(0, '#000');
+                    sock.addColorStop(0.7, '#000');
+                    sock.addColorStop(1, 'rgba(0,0,0,0)');
+                    ctx.fillStyle = sock;
+                    ctx.beginPath();
+                    ctx.ellipse(ex, ey, size * 0.24, size * 0.2, side * 0.3, 0, Math.PI * 2);
+                    ctx.fill();
+
+                    // Tiny glowing pupils, darting
+                    const px = ex + (Math.random() - 0.5) * size * 0.03;
+                    const py = ey + (Math.random() - 0.5) * size * 0.03;
+                    ctx.shadowColor = '#f00';
+                    ctx.shadowBlur = size * 0.15;
+                    ctx.fillStyle = '#ff2a00';
+                    ctx.beginPath();
+                    ctx.arc(px, py, size * 0.035, 0, Math.PI * 2);
+                    ctx.fill();
+                    ctx.fillStyle = '#fff';
+                    ctx.beginPath();
+                    ctx.arc(px, py, size * 0.012, 0, Math.PI * 2);
+                    ctx.fill();
+                    ctx.shadowBlur = 0;
+
+                    // Bloody tears
+                    ctx.fillStyle = '#7a0000';
+                    const drip = size * (0.2 + p * 0.6);
+                    ctx.fillRect(ex - size * 0.02 + side * size * 0.05, ey + size * 0.15, size * 0.035, drip);
+                });
+
+                // Nose cavity
+                ctx.fillStyle = '#000';
+                ctx.beginPath();
+                ctx.moveTo(0, -size * 0.02);
+                ctx.lineTo(size * 0.08, size * 0.17);
+                ctx.lineTo(-size * 0.08, size * 0.17);
+                ctx.closePath();
+                ctx.fill();
+
+                // Huge screaming mouth, stretching open
+                const open = 0.35 + 0.2 * Math.min(1, t / 300) + Math.random() * 0.05;
+                const my = size * 0.55;
+                ctx.fillStyle = '#0a0000';
+                ctx.beginPath();
+                ctx.ellipse(0, my, size * 0.3, size * open, 0, 0, Math.PI * 2);
+                ctx.fill();
+                const throat = ctx.createRadialGradient(0, my + size * 0.1, 0, 0, my, size * open);
+                throat.addColorStop(0, '#300');
+                throat.addColorStop(1, 'rgba(0,0,0,0)');
+                ctx.fillStyle = throat;
+                ctx.fill();
+
+                // Jagged teeth
+                ctx.fillStyle = '#e8e0c0';
+                const teeth = 9;
+                for (let i = 0; i < teeth; i++) {
+                    const a0 = Math.PI + (i / teeth) * Math.PI;
+                    const a1 = Math.PI + ((i + 1) / teeth) * Math.PI;
+                    const am = (a0 + a1) / 2;
+                    const rx = size * 0.3, ry = size * open;
+                    const len = 0.35 + (i % 2) * 0.25;
+                    // top row
+                    ctx.beginPath();
+                    ctx.moveTo(Math.cos(a0) * rx, my + Math.sin(a0) * ry);
+                    ctx.lineTo(Math.cos(a1) * rx, my + Math.sin(a1) * ry);
+                    ctx.lineTo(Math.cos(am) * rx * (1 - len * 0.4), my + Math.sin(am) * ry * (1 - len));
+                    ctx.fill();
+                    // bottom row
+                    ctx.beginPath();
+                    ctx.moveTo(Math.cos(a0) * rx, my - Math.sin(a0) * ry);
+                    ctx.lineTo(Math.cos(a1) * rx, my - Math.sin(a1) * ry);
+                    ctx.lineTo(Math.cos(am) * rx * (1 - len * 0.4), my - Math.sin(am) * ry * (1 - len));
+                    ctx.fill();
+                }
+
+                // Cracks across the face
+                ctx.strokeStyle = 'rgba(20,0,0,0.8)';
+                ctx.lineWidth = Math.max(2, size * 0.008);
+                ctx.beginPath();
+                ctx.moveTo(-size * 0.1, -size * 0.95);
+                ctx.lineTo(-size * 0.05, -size * 0.6);
+                ctx.lineTo(-size * 0.18, -size * 0.45);
+                ctx.moveTo(size * 0.35, -size * 0.7);
+                ctx.lineTo(size * 0.5, -size * 0.4);
+                ctx.lineTo(size * 0.45, -size * 0.1);
+                ctx.stroke();
+
+                ctx.restore();
+
+                // Blood vignette
+                const vig = ctx.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.3, W / 2, H / 2, Math.max(W, H) * 0.75);
+                vig.addColorStop(0, 'rgba(0,0,0,0)');
+                vig.addColorStop(1, 'rgba(90,0,0,0.95)');
+                ctx.fillStyle = vig;
+                ctx.fillRect(0, 0, W, H);
+
+                // Scanline glitch tears
+                for (let i = 0; i < 6; i++) {
+                    if (Math.random() < 0.5) {
+                        const y = Math.random() * H, h = 4 + Math.random() * 30;
+                        const dx = (Math.random() - 0.5) * 80;
+                        ctx.drawImage(this.canvas, 0, y, W, h, dx, y, W, h);
+                    }
+                }
+
+                // TV static, heavier as it fades out
+                this.drawStatic(0.12 + (p > 0.8 ? (p - 0.8) * 4 : 0) + (Math.random() < 0.1 ? 0.4 : 0));
+
+                // Random colour inversion flashes
+                if (Math.random() < 0.08) {
+                    ctx.save();
+                    ctx.globalCompositeOperation = 'difference';
+                    ctx.fillStyle = '#fff';
+                    ctx.fillRect(0, 0, W, H);
+                    ctx.restore();
+                }
+            }
+        }
+
+        // ========================================
         // GAME CLASS
         // ========================================
 
@@ -367,6 +732,8 @@
                 this.canvas = canvas;
                 this.ctx = canvas.getContext('2d');
                 this.audio = new AudioSystem();
+                this.jumpscare = new Jumpscare(document.getElementById('jumpscare'));
+                this.scaring = false;
 
                 // Game state
                 this.state = 'START';  // START, PLAYING, GAMEOVER
@@ -431,7 +798,7 @@
                 } else if (this.state === 'PLAYING') {
                     this.bird.flap();
                     this.audio.play('flap');
-                } else if (this.state === 'GAMEOVER' && this.gameOverDelay > 30) {
+                } else if (this.state === 'GAMEOVER' && !this.scaring && this.gameOverDelay > 30) {
                     this.resetGame();
                 }
             }
@@ -496,7 +863,7 @@
                     if (this.groundOffset <= -50) {
                         this.groundOffset = 0;
                     }
-                } else if (this.state === 'GAMEOVER') {
+                } else if (this.state === 'GAMEOVER' && !this.scaring) {
                     this.gameOverDelay++;
                 }
             }
@@ -530,8 +897,12 @@
                 this.gameOverDelay = 0;
                 this.saveBestScore();
                 this.audio.play('hit');
-                setTimeout(() => this.audio.play('die'), 100);
-                setTimeout(() => this.audio.play('swoosh'), 300);
+                this.audio.playScream();
+                this.scaring = true;
+                this.jumpscare.trigger(() => {
+                    this.scaring = false;
+                    this.audio.play('swoosh');
+                });
             }
 
             draw() {
